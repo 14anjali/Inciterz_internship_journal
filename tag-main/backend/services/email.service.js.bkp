@@ -1,0 +1,89 @@
+import nodemailer from 'nodemailer';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Create reusable transporter object using the default SMTP transport
+const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'mail.theaquaguide.com',
+    port: process.env.SMTP_PORT || 587,
+    secure: false, // true for 465, false for other ports
+    auth: {
+        user: process.env.SMTP_USER || 'noreply@theaquaguide.com', // generated ethereal user
+        pass: process.env.SMTP_PASS || 'Support@123', // generated ethereal password
+    },
+});
+
+const templateDir = path.join(__dirname, '../templates/emails');
+
+/**
+ * Reads a template file and replaces placeholders with data
+ * @param {string} templateName - The name of the template file (e.g., 'password_reset.html')
+ * @param {object} data - Key-value pairs to replace in the template
+ * @returns {Promise<string>} - The rendered HTML
+ */
+const renderTemplate = async (templateName, data) => {
+    const filePath = path.join(templateDir, templateName);
+    try {
+        let html = await fs.promises.readFile(filePath, 'utf8');
+        
+        // Simple placeholder replacement: {{key}}
+        for (const key in data) {
+            const regex = new RegExp(`{{${key}}}`, 'g');
+            html = html.replace(regex, data[key]);
+        }
+        
+        // Clean up any unused placeholders (optional, but good for cleanup)
+        // html = html.replace(/{{.*?}}/g, ''); 
+        
+        return html;
+    } catch (error) {
+        console.error(`Error reading template ${templateName}:`, error);
+        throw error;
+    }
+};
+
+/**
+ * Sends an email
+ * @param {string} to - Recipient email
+ * @param {string} subject - Email subject
+ * @param {string} templateName - Template filename
+ * @param {object} data - Data to inject into template
+ */
+export const sendEmail = async (to, subject, templateName, data) => {
+    try {
+        const html = await renderTemplate(templateName, data);
+
+        const info = await transporter.sendMail({
+            from: process.env.EMAIL_FROM || '"The Aqua Guide" <no-reply@theaquaguide.com>',
+            to,
+            subject,
+            html,
+        });
+
+        console.log(`Message sent: ${info.messageId}`);
+        // Preview only available when sending through an Ethereal account
+        console.log(`Preview URL: ${nodemailer.getTestMessageUrl(info)}`);
+        return info;
+    } catch (error) {
+        console.error("Error sending email:", error);
+        // In development, if email fails, log the content so we can see the link
+        if (process.env.NODE_ENV !== 'production') {
+            console.log('--- EMAIL CONTENT PREVIEW ---');
+            console.log(`To: ${to}`);
+            console.log(`Subject: ${subject}`);
+            console.log('--- BODY ---');
+            // Log a snippet or the data to help debug
+            console.log(data);
+            console.log('-----------------------------');
+        }
+        throw error;
+    }
+};
+
+export default {
+    sendEmail
+};

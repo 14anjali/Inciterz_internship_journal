@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Verify Your Email</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
+        .header { background-color: #0ea5e9; color: white; padding: 10px; text-align: center; border-radius: 5px 5px 0 0; }
+        .content { padding: 20px; }
+        .button { display: inline-block; background-color: #0ea5e9; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-top: 20px; }
+        .footer { text-align: center; font-size: 12px; color: #777; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>Verify Your Email Address</h2>
+        </div>
+        <div class="content">
+            <p>Hi {{name}},</p>
+            <p>Welcome to The Aqua Guide! Before you can start posting and chatting, we need to verify your email address to ensure you're a real human (and not a bot 🤖).</p>
+            <p>Please click the button below to verify your account:</p>
+            <p style="text-align: center;">
+                <a href="{{verification_link}}" class="button">Verify Email</a>
+            </p>
+            <p>If you didn't create an account with us, please ignore this email.</p>
+            <p>Thanks,<br>The Aqua Guide Team</p>
+        </div>
+        <div class="footer">
+            <p>&copy; 2026 The Aqua Guide. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>

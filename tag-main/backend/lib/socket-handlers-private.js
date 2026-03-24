@@ -1,0 +1,282 @@
+import jwt from "jsonwebtoken";
+import Conversation from "../models/conversation.model.js";
+import ConversationParticipant from "../models/conversation_participant.model.js";
+import PersonalMessage from "../models/personal_message.model.js";
+import User from "../models/user.model.js";
+
+import { socketAuthMiddleware } from "../middleware/socket.middleware.js";
+
+export function setupPrivateChat(io) {
+  const chat = io.of("/api/chat/private");
+
+  // Track online users in private chat namespace
+  const onlineUsers = new Map(); // userId -> socketId
+
+  console.log("Private chat namespace initialized");
+
+  // Use the shared middleware that allows guests
+  chat.use(socketAuthMiddleware);
+
+  // Helper function to broadcast user status changes
+  async function broadcastUserStatus(userId, isOnline) {
+
+    try {
+      console.log(`Broadcasting status for user ${userId} (${isOnline ? 'online' : 'offline'})`);
+
+      // Broadcast to all connected clients in the private chat namespace
+      chat.emit("user-status-changed", {
+        userId,
+        isOnline,
+        timestamp: new Date()
+      });
+    } catch (error) {
+      console.error("Error broadcasting user status:", error);
+    }
+  }
+
+  chat.on("connection", (socket) => {
+    const user = socket.user;
+    const isGuest = !user || user.role === 'guest';
+    const userId = user?.id;
+
+    if (isGuest) {
+      console.log(`Guest connected to private chat (socket: ${socket.id})`);
+      return;
+    }
+
+    console.log(`User ${userId} connected to private chat (socket: ${socket.id})`);
+
+    // Set socket.data.userId so WebRTC signaling handlers can access it
+    socket.data.userId = userId;
+
+    // Add user to online tracking
+    onlineUsers.set(userId, socket.id);
+
+    // Update last_seen when user connects
+    User.update(
+      { last_seen: new Date() },
+      { where: { id: userId } }
+    ).catch(err => console.error("Error updating last_seen on connect:", err));
+
+    // Broadcast user came online to all their conversations
+    broadcastUserStatus(userId, true);
+
+    // Keep-alive: Update last_seen every 30 seconds while connected
+    const keepAliveInterval = setInterval(async () => {
+      try {
+        await User.update(
+          { last_seen: new Date() },
+          { where: { id: userId } }
+        );
+        console.log(`Updated last_seen for user ${userId}`);
+      } catch (err) {
+        console.error("Error updating last_seen in keep-alive:", err);
+      }
+    }, 30 * 1000); // Every 30 seconds
+
+    // Store interval ID for cleanup
+    socket.data.keepAliveInterval = keepAliveInterval;
+
+    socket.on("join-conversation", (conversationId) => {
+      socket.join(conversationId);
+      console.log(`User ${userId} joined conversation ${conversationId}`);
+    });
+
+    socket.on("send-private-message", async ({ conversationId, message }, callback) => {
+      console.log(`Message received from ${userId} to conversation ${conversationId}`);
+      console.log(`Message content: "${message}"`);
+
+      try {
+        // Verify user is participant in this conversation
+        const participant = await ConversationParticipant.findOne({
+          where: {
+            conversation_id: conversationId,
+            user_id: userId,
+          },
+        });
+
+        if (!participant) {
+          const error = "You are not in this conversation";
+          console.error("Error: ", error);
+          socket.emit("error", error);
+          if (callback) callback({ success: false, message: error });
+          return;
+        }
+
+        console.log("User is participant");
+
+        // Create message
+        const msg = await PersonalMessage.create({
+          conversation_id: conversationId,
+          sender_id: userId,
+          message,
+        });
+
+        console.log("Message saved to DB:", msg.id);
+
+        // Update conversation last message time
+        await Conversation.update(
+          { last_message_at: new Date() },
+          { where: { id: conversationId } }
+        );
+
+        // Fetch with sender details
+        const fullMsg = await PersonalMessage.findByPk(msg.id, {
+          include: {
+            model: User,
+            as: "sender",
+            attributes: ["id", "name", "userid"]
+          },
+        });
+
+        const messageData = {
+          id: fullMsg.id,
+          conversation_id: fullMsg.conversation_id,
+          sender_id: fullMsg.sender_id,
+          message: fullMsg.message,
+          created_at: fullMsg.created_at,
+          updated_at: fullMsg.updated_at,
+          is_deleted: fullMsg.is_deleted,
+          sender: fullMsg.sender,
+        };
+
+        console.log("Broadcasting message to room:", conversationId);
+
+        // Emit to conversation room
+        chat.to(conversationId).emit("private-message-received", messageData);
+
+        console.log("Message sent successfully");
+        if (callback) callback({ success: true, message: "Message sent" });
+      } catch (err) {
+        console.error("Error sending private message:", err);
+        console.error("Stack:", err.stack);
+        socket.emit("error", "Failed to send message");
+        if (callback) callback({ success: false, message: "Failed to send message" });
+      }
+    });
+
+    socket.on("disconnect", () => {
+      console.log(`User ${userId} disconnected from private chat`);
+
+      // Clear keep-alive interval
+      if (socket.data.keepAliveInterval) {
+        clearInterval(socket.data.keepAliveInterval);
+      }
+
+      // Remove user from online tracking
+      onlineUsers.delete(userId);
+
+      // Update last_seen on disconnect
+      User.update(
+        { last_seen: new Date() },
+        { where: { id: userId } }
+      ).catch(err => console.error("Error updating last_seen on disconnect:", err));
+
+      // Broadcast user went offline
+      broadcastUserStatus(userId, false);
+
+      // Notify active calls of disconnect
+      socket.broadcast.emit("user-disconnected", userId);
+    });
+
+    // --- WebRTC Signaling Events ---
+
+    socket.on("call-user", ({ userToCall, signalData, name, isVideo, callId }) => {
+      const fromUserId = socket.data.userId; // 🔒 TRUST SERVER ONLY
+
+      console.log(`Call initiated from ${fromUserId} to ${userToCall} (CallID: ${callId})`);
+
+      const socketId = onlineUsers.get(userToCall);
+      if (!socketId) {
+        socket.emit("call-failed", { reason: "User is offline" });
+        return;
+      }
+
+      chat.to(socketId).emit("call-received", {
+        signal: signalData,
+        from: fromUserId, // UUID ONLY
+        name,
+        isVideo,
+        callId
+      });
+    });
+
+
+    socket.on("answer-call", ({ signal, to, callId }) => {
+      const fromUserId = socket.data.userId;
+
+      console.log(`Call answered by ${fromUserId} to ${to} (CallID: ${callId})`);
+
+      const socketId = onlineUsers.get(to);
+      if (socketId) {
+        chat.to(socketId).emit("call-answered", {
+          signal,
+          from: fromUserId,
+          callId
+        });
+      }
+    });
+
+    socket.on("reject-call", ({ to, callId }) => {
+      const fromUserId = socket.data.userId;
+      console.log(`Call rejected by ${fromUserId} (CallID: ${callId})`);
+      const socketId = onlineUsers.get(to);
+      if (socketId) {
+        chat.to(socketId).emit("call-rejected", {
+          from: fromUserId,
+          callId
+        });
+      }
+    });
+
+    socket.on("call-busy", ({ to, callId }) => {
+      const fromUserId = socket.data.userId;
+      console.log(`User ${fromUserId} is busy (CallID: ${callId})`);
+      const socketId = onlineUsers.get(to);
+      if (socketId) {
+        chat.to(socketId).emit("call-failed", {
+          reason: "User is busy",
+          callId
+        });
+      }
+    });
+
+
+    socket.on("call-renegotiate", ({ to, signalData, callId }) => {
+      const fromUserId = socket.data.userId;
+      console.log(`Renegotiation from ${fromUserId} to ${to} (CallID: ${callId})`);
+      const socketId = onlineUsers.get(to);
+      if (socketId) {
+        chat.to(socketId).emit("call-renegotiate", {
+          signal: signalData,
+          from: fromUserId,
+          callId
+        });
+      }
+    });
+
+    socket.on("ice-candidate", ({ candidate, to, callId }) => {
+      const fromUserId = socket.data.userId;
+
+      const socketId = onlineUsers.get(to);
+      if (socketId) {
+        chat.to(socketId).emit("ice-candidate-received", {
+          candidate,
+          from: fromUserId,
+          callId
+        });
+      }
+    });
+
+
+    socket.on("end-call", ({ to, callId }) => {
+      const fromUserId = socket.data.userId;
+
+      const socketId = onlineUsers.get(to);
+      if (socketId) {
+        chat.to(socketId).emit("call-ended", { from: fromUserId, callId });
+      }
+    });
+
+  });
+}

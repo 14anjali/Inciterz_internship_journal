@@ -1,0 +1,53 @@
+import { DataTypes, Model } from 'sequelize';
+import sequelize from '../lib/db.js';
+import CommunityForum from './community_forum_model.js';
+
+class Comments extends Model { }
+
+Comments.init(
+    {
+        id: {
+            type: DataTypes.UUID,
+            defaultValue: DataTypes.UUIDV4,
+            primaryKey: true,
+        },
+        content: {
+            type: DataTypes.STRING,
+            allowNull: false
+        },
+        user_id: {
+            type: DataTypes.UUID,
+            references: {
+                model: "Users",
+                key: "id"
+            },
+            allowNull: true
+        },
+        forum_id: {
+            type: DataTypes.UUID,
+            references: {
+                model: CommunityForum,
+                key: "id"
+            },
+            allowNull: false
+        },
+        is_ownership_transferred: {
+            type: DataTypes.BOOLEAN,
+            defaultValue: false,
+            allowNull: false
+        },
+        original_owner_name: {
+            type: DataTypes.STRING,
+            allowNull: true
+        }
+    },
+    {
+        sequelize,
+        modelName: "Comments",
+        timestamps: true,
+    }
+)
+
+
+
+export default Comments;
